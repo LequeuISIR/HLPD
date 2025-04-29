@@ -23,9 +23,10 @@ from transformers import (
 )
 from transformers.trainer_utils import get_last_checkpoint
 from data import DATA_DIR
-from data.hiera_multilabel_bench.hiera_multilabel_bench import WOS_CONCEPTS, RCV_CONCEPTS, BGC_CONCEPTS, AAPD_CONCEPTS
+from data.hiera_multilabel_bench.hiera_multilabel_bench import WOS_CONCEPTS, RCV_CONCEPTS, BGC_CONCEPTS, AAPD_CONCEPTS, \
+      MANIFESTO_CONCEPTS
 from data.hiera_multilabel_bench.hiera_label_descriptors import label2desc_reduced_rcv, label2desc_reduced_aapd, \
-    label2desc_reduced_bgc
+    label2desc_reduced_bgc, label2desc_reduced_manifesto
 from data_collator import DataCollatorHTC
 from models.t5_classifier import T5ForSequenceClassification
 from models.template_label_description_temp import generate_template
@@ -139,14 +140,15 @@ def main():
     TrainingArguments.output_dir = "output"
     parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
-    training_args.eval_steps = 500
+    training_args.eval_steps = 2000
     training_args.evaluation_strategy = "steps"
     training_args.save_strategy = "steps"
-    training_args.save_steps = 500
-    training_args.eval_delay = 8000
+    training_args.save_steps = 2000
+    # training_args.eval_delay = 8000
     training_args.save_only_model = True
-    training_args.logging_steps = 500
+    training_args.logging_steps = 1000
     training_args.save_safetensors = False
+    training_args.save_total_limit = 2
     print(model_args)
     print(training_args)
     print(data_args)
@@ -161,6 +163,7 @@ def main():
     last_checkpoint = None
     if os.path.isdir(training_args.output_dir) and training_args.do_train and not training_args.overwrite_output_dir:
         last_checkpoint = get_last_checkpoint(training_args.output_dir)
+        print()
         if last_checkpoint is None and len(os.listdir(training_args.output_dir)) > 0:
             raise ValueError(
                 f"Output directory ({training_args.output_dir}) already exists and is not empty. "
@@ -172,6 +175,7 @@ def main():
                 "the `--output_dir` or add `--overwrite_output_dir` to train from scratch."
             )
 
+    
     # Set seed before initializing model.
     set_seed(training_args.seed)
     label_list = None
@@ -179,9 +183,10 @@ def main():
     label_id2desc = None
     train_dataset = None
     if training_args.do_train:
+        print("loading MANIFESTO DATASET HEHEHEHEHE")
         print(os.path.join(DATA_DIR, data_args.dataset_bench))
         train_dataset = load_dataset(os.path.join(DATA_DIR, data_args.dataset_bench), data_args.dataset_name,
-                                     split="train")
+                                     split="train", num_proc=5)
         label_list = list(
             range(train_dataset.features['concepts'].feature.num_classes))
         labels_codes = train_dataset.features['concepts'].feature.names
@@ -189,8 +194,8 @@ def main():
 
     if training_args.do_eval:
         eval_dataset = load_dataset(os.path.join(DATA_DIR, data_args.dataset_bench), data_args.dataset_name,
-                                    split="validation"
-                                    )
+                                    split="validation", num_proc=5)
+                                    
         if label_list is None:
             label_list = list(
                 range(eval_dataset.features['concepts'].feature.num_classes))
@@ -199,7 +204,7 @@ def main():
 
     if training_args.do_predict:
         predict_dataset = load_dataset(os.path.join(DATA_DIR, data_args.dataset_bench), data_args.dataset_name,
-                                       split="test")
+                                       split="test", num_proc=5)
         if label_list is None:
             label_list = list(
                 range(predict_dataset.features['concepts'].feature.num_classes))
@@ -210,8 +215,8 @@ def main():
     if 'wos' in data_args.dataset_name:
         parent_child_relationship = WOS_CONCEPTS["parent_childs"]
         label_descriptors = WOS_CONCEPTS[f'level_{data_args.dataset_name.split("-")[-1]}']
+        print(label_descriptors)
         label_descs = label_descriptors
-
     elif 'aapd' in data_args.dataset_name:
         parent_child_relationship = AAPD_CONCEPTS["parent_childs"]
         label_descriptors = AAPD_CONCEPTS[f'level_{data_args.dataset_name.split("-")[-1]}']
@@ -224,10 +229,19 @@ def main():
         parent_child_relationship = BGC_CONCEPTS["parent_childs"]
         label_descriptors = BGC_CONCEPTS[f'level_{data_args.dataset_name.split("-")[-1]}']
         label_descs = [label2desc_reduced_bgc[key] for key in label_descriptors]
+
+    elif 'manifesto' in data_args.dataset_name:
+        print("loaded MANIFESTO CONCEPTS HEHEHEHEHE")
+        parent_child_relationship = MANIFESTO_CONCEPTS["parent_childs"]
+        label_descriptors = MANIFESTO_CONCEPTS[f'level_{data_args.dataset_name.split("-")[-1]}']
+        print(label_descriptors)
+        label_descs = label_descriptors
     else:
         raise Exception(f'Dataset {data_args.dataset_name} is not supported!')
     label_desc2id = {label_desc: idx for idx, label_desc in enumerate(labels_codes)}
     label_id2desc = {idx: label_desc for idx, label_desc in enumerate(labels_codes)}
+
+
     print(f'LabelDesc2Id: {label_desc2id}')
     print(f'Label description : {label_descs}')
     config = AutoConfig.from_pretrained(
@@ -364,6 +378,7 @@ def main():
     )
     # Training
     if training_args.do_train:
+        
         checkpoint = None
         if training_args.resume_from_checkpoint is not None:
             checkpoint = training_args.resume_from_checkpoint
