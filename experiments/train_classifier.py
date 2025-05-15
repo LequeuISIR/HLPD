@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 from datasets import load_dataset
 from scipy.special import expit
-from sklearn.metrics import f1_score, classification_report
+from sklearn.metrics import f1_score, classification_report, accuracy_score
 from transformers import (
     Trainer,
     AutoConfig,
@@ -22,6 +22,10 @@ from transformers import (
     EarlyStoppingCallback,
 )
 from transformers.trainer_utils import get_last_checkpoint
+from torchmetrics.classification import Accuracy
+import numpy as np
+import torch
+import torch.nn.functional as F
 from data import DATA_DIR
 from data.hiera_multilabel_bench.hiera_multilabel_bench import WOS_CONCEPTS, RCV_CONCEPTS, BGC_CONCEPTS, AAPD_CONCEPTS, \
       MANIFESTO_CONCEPTS
@@ -144,11 +148,24 @@ def main():
     training_args.evaluation_strategy = "steps"
     training_args.save_strategy = "steps"
     training_args.save_steps = 2000
-    # training_args.eval_delay = 8000
+    training_args.eval_delay = 8000
     training_args.save_only_model = True
-    training_args.logging_steps = 1000
+    training_args.logging_steps = 100
     training_args.save_safetensors = False
     training_args.save_total_limit = 2
+    data_args.max_train_samples = None
+    data_args.max_eval_samples = None
+
+    # adapt to JZ
+    training_args.dataloader_num_workers = 8
+    training_args.dataloader_pin_memory = True
+    training_args.dataloader_drop_last = True
+    training_args.persistent_workers = True  
+    training_args.dataloader_prefetch_factor = 2
+
+
+
+    is_dev_run = False
     print(model_args)
     print(training_args)
     print(data_args)
@@ -183,18 +200,23 @@ def main():
     label_id2desc = None
     train_dataset = None
     if training_args.do_train:
-        print("loading MANIFESTO DATASET HEHEHEHEHE")
+        split = "train"
+        if is_dev_run :
+            split = "train[0:1000]"
         print(os.path.join(DATA_DIR, data_args.dataset_bench))
         train_dataset = load_dataset(os.path.join(DATA_DIR, data_args.dataset_bench), data_args.dataset_name,
-                                     split="train", num_proc=5)
+                                     split=split, num_proc=8, trust_remote_code = True)
         label_list = list(
             range(train_dataset.features['concepts'].feature.num_classes))
         labels_codes = train_dataset.features['concepts'].feature.names
         num_labels = len(label_list)
 
     if training_args.do_eval:
+        split = "validation"
+        if is_dev_run :
+            split = "validation[0:1000]"
         eval_dataset = load_dataset(os.path.join(DATA_DIR, data_args.dataset_bench), data_args.dataset_name,
-                                    split="validation", num_proc=5)
+                                    split=split, num_proc=8, trust_remote_code = True)
                                     
         if label_list is None:
             label_list = list(
@@ -203,8 +225,11 @@ def main():
             num_labels = len(label_list)
 
     if training_args.do_predict:
+        split = "test"
+        if is_dev_run :
+            split = "test[0:1000]"
         predict_dataset = load_dataset(os.path.join(DATA_DIR, data_args.dataset_bench), data_args.dataset_name,
-                                       split="test", num_proc=5)
+                                       split=split, num_proc=8, trust_remote_code = True)
         if label_list is None:
             label_list = list(
                 range(predict_dataset.features['concepts'].feature.num_classes))
@@ -212,6 +237,7 @@ def main():
             num_labels = len(label_list)
 
     parent_child_relationship = None
+    label_evaluation_tasks = None
     if 'wos' in data_args.dataset_name:
         parent_child_relationship = WOS_CONCEPTS["parent_childs"]
         label_descriptors = WOS_CONCEPTS[f'level_{data_args.dataset_name.split("-")[-1]}']
@@ -229,23 +255,27 @@ def main():
         parent_child_relationship = BGC_CONCEPTS["parent_childs"]
         label_descriptors = BGC_CONCEPTS[f'level_{data_args.dataset_name.split("-")[-1]}']
         label_descs = [label2desc_reduced_bgc[key] for key in label_descriptors]
-
+        label_descs = label_descriptors
     elif 'manifesto' in data_args.dataset_name:
         print("loaded MANIFESTO CONCEPTS HEHEHEHEHE")
         parent_child_relationship = MANIFESTO_CONCEPTS["parent_childs"]
         label_descriptors = MANIFESTO_CONCEPTS[f'level_{data_args.dataset_name.split("-")[-1]}']
-        print(label_descriptors)
+        label_evaluation_tasks = MANIFESTO_CONCEPTS["level_2"]
+        label_evaluation_mask = [1 if label in label_evaluation_tasks else 0 for label in label_descriptors]
+        print("label_evaluation_tasks", label_evaluation_tasks)
         label_descs = label_descriptors
     else:
         raise Exception(f'Dataset {data_args.dataset_name} is not supported!')
     label_desc2id = {label_desc: idx for idx, label_desc in enumerate(labels_codes)}
     label_id2desc = {idx: label_desc for idx, label_desc in enumerate(labels_codes)}
+    # label_evaluation_tasks_desc2id = {key: value for key, value in label_desc2id.items() if key in label_evaluation_tasks}
+    # label_evaluation_tasks_id2desc = {key: value for key, value in label_id2desc.items() if value in label_evaluation_tasks}
 
 
     print(f'LabelDesc2Id: {label_desc2id}')
     print(f'Label description : {label_descs}')
     config = AutoConfig.from_pretrained(
-        model_args.model_name,
+        "google/mt5-small",
         num_labels=num_labels,
         label2id=label_desc2id,
         id2label=label_id2desc,
@@ -269,10 +299,12 @@ def main():
     label_descs = generate_template(parent_child_relationship, label_desc2id, label_descs)
     print("HIERA TEMPLATE ")
     print(label_descs)
+
     tokenizer = AutoTokenizer.from_pretrained(
-        model_args.model_name,
+        "google/mt5-small",
         legacy=False
     )
+    print(config)
     model = T5ForSequenceClassification.from_pretrained(
         model_args.model_name,
         from_tf=bool(".ckpt" in model_args.model_name),
@@ -337,6 +369,14 @@ def main():
                 load_from_cache_file=False,
                 desc="Running tokenizer on prediction dataset",
             )
+    
+    if label_evaluation_tasks :
+        print("NEW TASK")
+        print(label_evaluation_tasks)
+        num_classes = len(label_evaluation_tasks)
+        print(num_classes)
+        macro_accuracy = Accuracy(task="multiclass", num_classes=num_classes, average="macro")
+        micro_accuracy = Accuracy(task="multiclass", num_classes=num_classes, average="micro")
 
     # You can define your custom compute_metrics function. It takes an `EvalPrediction` object (a namedtuple with a
     # predictions and label_ids field) and has to return a dictionary string to float.
@@ -345,10 +385,42 @@ def main():
         logits = p.predictions[0] if isinstance(p.predictions, tuple) else p.predictions
         probs = expit(logits)
         preds = (probs >= 0.5).astype('int32')
+        
+        print("PRED")
+        print(preds)
+        print("label_evaluation_mask")
+        print(label_evaluation_mask)
+        print("labels_id")
+        print(p.label_ids)
+        
         macro_f1 = f1_score(y_true=p.label_ids, y_pred=preds, average='macro', zero_division=0)
         micro_f1 = f1_score(y_true=p.label_ids, y_pred=preds, average='micro', zero_division=0)
+        print("macro_f1", macro_f1)
+        print("micro_f1", micro_f1)
         mean_macro_micro_f1 = (macro_f1 + micro_f1) / 2
-        return {'macro-f1': macro_f1, 'micro-f1': micro_f1, "macro-micro-f1": mean_macro_micro_f1}
+
+        results = {'macro-f1': macro_f1, 'micro-f1': micro_f1, "macro-micro-f1": mean_macro_micro_f1}
+
+
+        if label_evaluation_tasks :
+            
+            probs_evaluation_task = torch.tensor([[pred for id, pred in enumerate(value) if label_evaluation_mask[id]] for value in probs]).double()
+            level2_pred_class = probs_evaluation_task.max(dim=1)[1]
+            level2_one_hot = F.one_hot(level2_pred_class, probs_evaluation_task.shape[1])
+            label_ids_evaluation_task = torch.tensor([[label for id, label in enumerate(label_id) if label_evaluation_mask[id]] for label_id in p.label_ids]).double()
+            level2_label_class = label_ids_evaluation_task.max(dim=1)[1]
+
+            # f1 needs one_hot encoding
+            results["level2_macro_f1"] = f1_score(y_pred=level2_one_hot, y_true=label_ids_evaluation_task, average='macro', zero_division=0)
+            results["level2_micro_f1"] = f1_score(y_pred=level2_one_hot, y_true=label_ids_evaluation_task, average='micro', zero_division=0)
+            results["level_2_macro_micro_f1"] = (results["level2_macro_f1"] + results["level2_micro_f1"]) / 2
+            
+            # micro and macro accuracy need label encoding
+            results["level2_macro_acc"] = macro_accuracy(preds=level2_pred_class, target = level2_label_class).item()
+            results["level2_micro_acc"] = micro_accuracy(preds=level2_pred_class, target = level2_label_class).item()
+
+        
+        return results
 
     trainer_class = Trainer
     data_collator = DataCollatorHTC(tokenizer)
@@ -362,9 +434,11 @@ def main():
 
     optimizer = None
     lr_scheduler = None
-    if training_args.optim == 'adafactor':
+    if training_args.optim == 'adafactor' and training_args.do_train:
         optimizer = get_optimizer(model, training_args, data_args)
         lr_scheduler = get_lr_scheduler(optimizer, training_args, data_args)
+    else :
+        optimizer, lr_scheduler = None, None
     # Initialize our Trainer
     trainer = trainer_class(
         model=model,

@@ -152,7 +152,7 @@ class T5ForSequenceClassification(T5PreTrainedModel):
         encoder_config.is_encoder_decoder = False
         self.shared = nn.Embedding(config.vocab_size, config.d_model)
         self.encoder = T5Stack(encoder_config, self.shared)
-        self.train_size = config.train_size
+        self.train_size = config.train_size if hasattr(config, 'train_size') else 0
         self.label_train_iteration = 0
         self.use_t5_label_encoding = config.use_t5_label_encoding
         self.static_label_encoding = config.static_label_encoding
