@@ -1,5 +1,16 @@
+#!/bin/bash
+#SBATCH --partition=hard
+#SBATCH --job-name=test_eval_HLPD
+#SBATCH --nodes=1
+#SBATCH --gpus=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --time=2-00:00:00
+#SBATCH --output=%x-%j.out
+#SBATCH --error=%x-%j.err
+
+
 MODEL_NAME='google/t5-v1_1-base'
-BATCH_SIZE=16
+BATCH_SIZE=4
 DATASET='wos-all'
 OPTIMIZER='adafactor'
 DATA_BENCH='hiera_multilabel_bench'
@@ -8,12 +19,10 @@ T5_LABEL_ENCODING=true
 STATIC_LABEL_ENCODING=true
 ZLPR=true
 USE_BIDIRECTIONNAL_ATTENTION=false
+SEED=84
 export PYTHONPATH=.
-export CUDA_VISIBLE_DEVICES=1
 export TOKENIZERS_PARALLELISM=false
-for SEED in 84
-do
-  python experiments/train_classifier.py \
+CUDA_VISIBLE_DEVICES=0 srun python experiments/train_classifier.py \
   --use_t5_label_encoding ${T5_LABEL_ENCODING} \
   --static_label_encoding ${STATIC_LABEL_ENCODING} \
   --use_bidirectional_attention ${USE_BIDIRECTIONNAL_ATTENTION} \
@@ -36,11 +45,8 @@ do
   --per_device_train_batch_size ${BATCH_SIZE} \
   --per_device_eval_batch_size ${BATCH_SIZE} \
   --seed ${SEED} \
-  --warmup_ratio 0.1 \
+  --warmup_ratio 0.05 \
   --optim ${OPTIMIZER} \
   --gradient_accumulation_steps 1 \
   --eval_accumulation_steps 1 \
   --learning_rate ${LEARNING_RATE}
-
-done
-$SHELL

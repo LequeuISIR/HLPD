@@ -21,6 +21,8 @@ from transformers import (
     set_seed,
     EarlyStoppingCallback,
 )
+from experiments.utils import mask_tokens
+
 from transformers.trainer_utils import get_last_checkpoint
 from torchmetrics.classification import Accuracy
 import numpy as np
@@ -31,7 +33,7 @@ from data.hiera_multilabel_bench.hiera_multilabel_bench import WOS_CONCEPTS, RCV
       MANIFESTO_CONCEPTS
 from data.hiera_multilabel_bench.hiera_label_descriptors import label2desc_reduced_rcv, label2desc_reduced_aapd, \
     label2desc_reduced_bgc, label2desc_reduced_manifesto
-from data_collator import DataCollatorHTC
+from .data_collator import DataCollatorHTC
 from models.t5_classifier import T5ForSequenceClassification
 from models.template_label_description_temp import generate_template
 
@@ -337,6 +339,13 @@ def main():
         batch["label_ids"] = [[1.0 if label in labels else 0.0 for label in label_list] for labels in
                               examples["concepts"]]
         batch['labels'] = batch['label_ids']
+
+
+        if config.use_mexma_MLM :
+            #TODO
+            batch['input_ids'], batch['labels'] = mask_tokens(
+                tokenizer,
+            )
         return batch
 
     if training_args.do_train:

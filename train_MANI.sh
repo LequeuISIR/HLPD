@@ -38,10 +38,10 @@ CUDA_VISIBLE_DEVICES=0,1 srun python experiments/train_classifier.py \
   --do_eval \
   --do_pred \
   --resume_from_checkpoint ./data/output/adafactor/manifesto-all/seed_84/checkpoint-34000 \
+  --overwrite_output_dir False \
   --load_best_model_at_end \
   --metric_for_best_model macro-micro-f1 \
   --greater_is_better True \
-  --overwrite_output_dir False \
   --evaluation_strategy steps \
   --save_strategy steps \
   --num_train_epochs 30 \

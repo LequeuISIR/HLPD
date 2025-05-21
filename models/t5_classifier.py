@@ -27,6 +27,47 @@ from models.modeling_t5 import T5PreTrainedModel, T5Stack
 from transformers.utils.model_parallel_utils import assert_device_map, get_device_map
 from models.decoder_attention_mask_utils import *
 from models.losses import ZLPR
+
+class UnmaskingHead(nn.Module) :
+    def __init__(self, vocab_size: int, d_model: int, num_heads: int, num_layers: int):
+        super().__init__()
+        self.transformers = nn.ModuleList([
+            nn.TransformerEncoderLayer(d_model=d_model, nhead=num_heads) for _ in range(num_layers)])
+        self.linear = nn.Linear(d_model, vocab_size)
+    
+    def forward(self, input: torch.tensor):
+        # permute to (seq_len, batch_size, d_model)
+        input = input.permute(1, 0, 2)
+
+        # apply transformer layers
+        for layer in self.transformers :
+            input = layer(input)
+
+        # permute back to (batch_size, seq_len, vocab_size)
+        input = input.permute(1, 0, 2)
+
+        return self.linear(input)
+ 
+class MexmaUnmaskingModel(nn.Module) :
+    def __init__(self, encoding_model: nn.Module, num_heads: int = 1, num_layers: int = 2):
+        super().__init__()
+        self.encoding_model = encoding_model
+        self.unmasking_head = UnmaskingHead(self.encoding_model.config.vocab_size, self.encoding_model.config.hidden_size, num_heads, num_layers)
+        
+    def forward(self, masked_inputs: torch.tensor, unmasked_cls: torch.tensor) :
+        print("unmasked cls", unmasked_cls)
+        masked_inputs = self.encoding_model(**masked_inputs, return_dict=True).last_hidden_state
+        print("masked inputs", masked_inputs)
+        print("before changed masked_input_cls", masked_inputs[:, 0])
+        # exchange CLS token with the unmasked CLS token
+        masked_inputs[:, 0] = unmasked_cls
+        print("adter chang masked_input_cls", masked_inputs[:, 0])
+
+        return self.unmasking_head(masked_inputs)
+
+
+
+
 class LabelWisePooler(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -144,7 +185,7 @@ class T5ForSequenceClassification(T5PreTrainedModel):
         r"decoder", r"label_pooler",
     ]
 
-    def __init__(self, config: T5Config, labels_tokens=None):
+    def __init__(self, config: T5Config, labels_tokens=None, use_mexma_MLM=False):
         super(T5ForSequenceClassification, self).__init__(config)
         encoder_config = copy.deepcopy(config)
         encoder_config.is_decoder = False
@@ -178,7 +219,7 @@ class T5ForSequenceClassification(T5PreTrainedModel):
             self.label_encoder = None
             if config.use_bidirectional_attention:
                 print(
-                    "USING BI-DIRECTIONAL ATTENTION MASK !!!!!!!!!!!!!!!    ")
+                    "USING BI-DIRECTIONAL ATTENTION MASK !!!!!!!!!!!!!!!")
                 self.labels_attention_mask = torch.ones(size=(len(self.labels), len(self.labels))).to(
                     device)
             if not self.static_label_encoding:
@@ -193,6 +234,12 @@ class T5ForSequenceClassification(T5PreTrainedModel):
         decoder_config.output_attentions = True
         decoder_config.dropout_rate = 0.0
         self.decoder = T5Stack(decoder_config, self.shared)
+
+        self.use_mexma_MLM = use_mexma_MLM
+        if self.use_mexma_MLM :
+            #TODO
+            pass
+
         # Initialize weights and apply final processing
         self.post_init()
         # Model parallel
