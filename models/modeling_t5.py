@@ -24,6 +24,7 @@ import torch
 from torch import nn
 from torch.nn import CrossEntropyLoss
 from torch.utils.checkpoint import checkpoint
+from transformers import PreTrainedModel
 from transformers.models.t5.tokenization_t5 import T5Tokenizer
 from transformers.activations import ACT2FN
 from transformers.modeling_outputs import (
@@ -32,7 +33,6 @@ from transformers.modeling_outputs import (
     Seq2SeqLMOutput,
     Seq2SeqModelOutput,
 )
-from models.modeling_utils import PreTrainedModel
 from transformers.pytorch_utils import find_pruneable_heads_and_indices, prune_linear_layer
 from transformers.utils import (
     DUMMY_INPUTS,
@@ -908,16 +908,20 @@ class T5Stack(T5PreTrainedModel):
             output_hidden_states=None,
             return_dict=None, is_label_updater=False
     ):
+        print("FORWARD T5 STACK OUI OUI")
         # Model parallel
         if self.model_parallel:
             torch.cuda.set_device(self.first_device)
             self.embed_tokens = self.embed_tokens.to(self.first_device)
+        
+        
         use_cache = use_cache if use_cache is not None else self.config.use_cache
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
 
         if input_ids is not None and inputs_embeds is not None:
             err_msg_prefix = "decoder_" if self.is_decoder else ""
@@ -927,6 +931,11 @@ class T5Stack(T5PreTrainedModel):
         elif input_ids is not None:
             input_shape = input_ids.size()
             input_ids = input_ids.view(-1, input_shape[-1])
+            print("input shape in decoder (btch_size, seq_length)")
+            print(input_shape)
+            print("input ids in decoder")
+            print(input_ids)
+            
         elif inputs_embeds is not None:
             input_shape = inputs_embeds.size()[:-1]
         else:
@@ -938,7 +947,7 @@ class T5Stack(T5PreTrainedModel):
             inputs_embeds = self.embed_tokens(input_ids)
 
         batch_size, seq_length = input_shape
-
+        
         # required mask seq length can be calculated via length of past
         mask_seq_length = past_key_values[0][0].shape[2] + seq_length if past_key_values is not None else seq_length
 
@@ -947,6 +956,7 @@ class T5Stack(T5PreTrainedModel):
 
         if attention_mask is None:
             attention_mask = torch.ones(batch_size, mask_seq_length).to(inputs_embeds.device)
+            ("AAAAAAAAAAAAAAAAAAAAAA")
         if self.is_decoder and encoder_attention_mask is None and encoder_hidden_states is not None:
             encoder_seq_length = encoder_hidden_states.shape[1]
             encoder_attention_mask = torch.ones(
@@ -959,7 +969,13 @@ class T5Stack(T5PreTrainedModel):
 
         # We can provide a self-attention mask of dimensions [batch_size, from_seq_length, to_seq_length]
         # ourselves in which case we just need to make it broadcastable to all heads.
+        print("attention mask AAAAAAAAAAAAA")
+        print(attention_mask)
+        print(input_shape)
         extended_attention_mask = self.get_extended_attention_mask(attention_mask, input_shape)
+        print("first extended attention mask")
+        print(extended_attention_mask)
+        
         # If a 2D or 3D attention mask is provided for the cross-attention
         # we need to make broadcastable to [batch_size, num_heads, seq_length, seq_length]
         if self.is_decoder and encoder_hidden_states is not None:
@@ -1033,9 +1049,31 @@ class T5Stack(T5PreTrainedModel):
                     None,  # past_key_value is always None with gradient checkpointing
                 )
             else:
+                # print("entry in layer module")
+                # print(layer_module)
+                # print("hidden states")
+                # print(hidden_states)
+                # print("extended attention mask")
+                # print(extended_attention_mask) # with infs
+                # print("position bias")
+                # print(position_bias) #None
+                # print("encoder hidden states")
+                # print(encoder_hidden_states)
+                # print("encoder extended attention mask")
+                # print(encoder_extended_attention_mask)
+                # print("encoder decoder position bias")
+                # print(encoder_decoder_position_bias) #none
+                # print("layer head mask")
+                # print(layer_head_mask) #none
+                # print("cross attention layer head mask")
+                # print(cross_attn_layer_head_mask) #none
+                # print("past key value")
+                # print(past_key_value) #none
+
+
                 layer_outputs = layer_module(
                     hidden_states,
-                    attention_mask=extended_attention_mask,
+                    attention_mask=None,
                     position_bias=position_bias,
                     encoder_hidden_states=encoder_hidden_states,
                     encoder_attention_mask=encoder_extended_attention_mask,
@@ -1046,6 +1084,9 @@ class T5Stack(T5PreTrainedModel):
                     use_cache=use_cache,
                     output_attentions=output_attentions,
                 )
+
+                print("layer outputs")
+                print(layer_outputs)
 
             # layer_outputs is a tuple with:
             # hidden-states, key-value-states, (self-attention position bias), (self-attention weights), (cross-attention position bias), (cross-attention weights)
@@ -1077,6 +1118,9 @@ class T5Stack(T5PreTrainedModel):
 
         hidden_states = self.final_layer_norm(hidden_states)
         hidden_states = self.dropout(hidden_states)
+
+        print("hidden states after final layer norm")
+        print(hidden_states)
 
         # Add last layer
         if output_hidden_states:

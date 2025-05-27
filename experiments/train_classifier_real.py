@@ -1,45 +1,47 @@
 #!/usr/bin/env python
 # coding=utf-8
-import glob
-import logging
-import os
-import pickle
-import shutil
-import sys
-from dataclasses import dataclass, field
-from typing import Optional
-from datasets import load_dataset
-from scipy.special import expit
-from sklearn.metrics import f1_score, classification_report, accuracy_score
-from transformers import (
-    Trainer,
-    AutoConfig,
-    AutoTokenizer,
-    EvalPrediction,
-    HfArgumentParser,
-    TrainingArguments,
-    set_seed,
-    EarlyStoppingCallback,
-)
-from transformers.trainer_utils import get_last_checkpoint
-from torchmetrics.classification import Accuracy
-import numpy as np
-import torch
-import torch.nn.functional as F
 from data import DATA_DIR
 from data.hiera_multilabel_bench.hiera_multilabel_bench import WOS_CONCEPTS, RCV_CONCEPTS, BGC_CONCEPTS, AAPD_CONCEPTS, \
       MANIFESTO_CONCEPTS
 from data.hiera_multilabel_bench.hiera_label_descriptors import label2desc_reduced_rcv, label2desc_reduced_aapd, \
     label2desc_reduced_bgc, label2desc_reduced_manifesto
-from data_collator import DataCollatorHTC
-from models.t5_classifier import T5ForSequenceClassification
 from models.template_label_description_temp import generate_template
+from models.roberta import EfficientXLMRobertaModel
+from models.HLPD_model import HLPD_model
+from data_collator import DataCollatorHTC
 
-logger = logging.getLogger(__name__)
+import logging
+import os
+from typing import Optional, Dict, Any
+from dataclasses import dataclass, field
+import sys
+
+import torch
+from sklearn.metrics import f1_score, classification_report, accuracy_score
+from torchmetrics.classification import Accuracy
+from transformers import (
+    HfArgumentParser,
+    AutoConfig,
+    AutoTokenizer,
+    EvalPrediction,
+    AutoModel,
+    TrainingArguments,
+    Trainer,
+    EarlyStoppingCallback,
+    set_seed
+    )
+from datasets import load_dataset
 from tokenizers.normalizers import NFKD
 from tokenizers.pre_tokenizers import WhitespaceSplit
 from optim import get_optimizer, get_lr_scheduler
+from scipy.special import expit
 
+import pickle
+import torch.nn.functional as F
+import glob
+import shutil
+
+logger = logging.getLogger(__name__)
 normalizer = NFKD()
 pre_tokenizer = WhitespaceSplit()
 
@@ -111,9 +113,14 @@ class DataTrainingArguments:
 
 @dataclass
 class ModelArguments:
-    model_name: str = field(
-        default="t5-base", metadata={"help": "Path to pretrained model or model identifier from huggingface.co/models"}
+    encoder_name: str = field(
+        default="FacebookAI/xlm-roberta-base", metadata={"help": "Path to pretrained model or model identifier from huggingface.co/models"}
     )
+
+    decoder_name: str = field(
+        default="mT5-small", metadata={"help": "Path to pretrained model or model identifier from huggingface.co/models"}
+    )
+    
     use_t5_label_encoding: bool = field(
         default=True,
         metadata={"help": "Whether to use T5 label encoding or not."},
@@ -144,6 +151,7 @@ def main():
     TrainingArguments.output_dir = "output"
     parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+
     training_args.eval_steps = 2000
     training_args.evaluation_strategy = "steps"
     training_args.save_strategy = "steps"
@@ -163,8 +171,6 @@ def main():
     training_args.persistent_workers = True  
     training_args.dataloader_prefetch_factor = 2
 
-
-
     is_dev_run = True
     print(model_args)
     print(training_args)
@@ -178,19 +184,19 @@ def main():
     )
     # Detecting last checkpoint.
     last_checkpoint = None
-    if os.path.isdir(training_args.output_dir) and training_args.do_train and not training_args.overwrite_output_dir:
-        last_checkpoint = get_last_checkpoint(training_args.output_dir)
-        print()
-        if last_checkpoint is None and len(os.listdir(training_args.output_dir)) > 0:
-            raise ValueError(
-                f"Output directory ({training_args.output_dir}) already exists and is not empty. "
-                "Use --overwrite_output_dir to overcome."
-            )
-        elif last_checkpoint is not None:
-            logger.info(
-                f"Checkpoint detected, resuming training at {last_checkpoint}. To avoid this behavior, change "
-                "the `--output_dir` or add `--overwrite_output_dir` to train from scratch."
-            )
+    # if os.path.isdir(training_args.output_dir) and training_args.do_train and not training_args.overwrite_output_dir:
+    #     last_checkpoint = get_last_checkpoint(training_args.output_dir)
+    #     print()
+    #     if last_checkpoint is None and len(os.listdir(training_args.output_dir)) > 0:
+    #         raise ValueError(
+    #             f"Output directory ({training_args.output_dir}) already exists and is not empty. "
+    #             "Use --overwrite_output_dir to overcome."
+    #         )
+    #     elif last_checkpoint is not None:
+    #         logger.info(
+    #             f"Checkpoint detected, resuming training at {last_checkpoint}. To avoid this behavior, change "
+    #             "the `--output_dir` or add `--overwrite_output_dir` to train from scratch."
+    #         )
 
     
     # Set seed before initializing model.
@@ -274,8 +280,9 @@ def main():
 
     print(f'LabelDesc2Id: {label_desc2id}')
     print(f'Label description : {label_descs}')
+    
     config = AutoConfig.from_pretrained(
-        "google/mt5-small",
+        model_args.decoder_name,
         num_labels=num_labels,
         label2id=label_desc2id,
         id2label=label_id2desc,
@@ -288,8 +295,10 @@ def main():
     config.use_bidirectional_attention = model_args.use_bidirectional_attention
     config.use_zlpr_loss = model_args.use_zlpr_loss
     config.batch_size = training_args.per_device_train_batch_size
+
     if train_dataset is not None:
         config.train_size = len(train_dataset)
+
     config.labels = label_descriptors
     print("LABELS")
     print(label_descriptors)
@@ -300,20 +309,35 @@ def main():
     print("HIERA TEMPLATE ")
     print(label_descs)
 
-    tokenizer = AutoTokenizer.from_pretrained(
-        "google/mt5-small",
-        legacy=False
+    tokenizer = AutoTokenizer.from_pretrained(model_args.encoder_name, 
+                                                legacy=True)
+    encoder = AutoModel.from_pretrained(model_args.encoder_name)
+
+    # if "roberta" in model_args.encoder_name:
+    #     encoder = EfficientXLMRobertaModel.from_pretrained(
+    #         model_args.encoder_name,
+    #     )
+
+    # else: 
+    encoder = AutoModel.from_pretrained(
+        model_args.encoder_name,
     )
+
+
+    config.d_model = encoder.config.hidden_size
     print(config)
-    model = T5ForSequenceClassification.from_pretrained(
-        model_args.model_name,
-        from_tf=bool(".ckpt" in model_args.model_name),
+
+
+    model = HLPD_model(
         config=config,
-        labels_tokens=tokenizer(
+        encoder=encoder,
+         labels_tokens=tokenizer(
             label_descs, truncation=True, add_special_tokens=False,
             padding='max_length', return_tensors='pt', max_length=64
         )
     )
+
+
     print(model.config)
     padding = "max_length"
 
