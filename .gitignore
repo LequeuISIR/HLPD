@@ -1,0 +1,12 @@
+__pycache__/
+*.err
+*.out
+*.log
+*.pyc
+*.pyo
+*.pyd
+mani/
+wandb/
+mlruns/
+data/output/
+*.ipynb
